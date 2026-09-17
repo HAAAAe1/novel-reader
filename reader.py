@@ -16,7 +16,6 @@ try:
 except ImportError:
     raise SystemExit("需要安装 ebooklib: pip install ebooklib")
 
-# ── 常量 ──────────────────────────────────────────────
 APP_NAME = "摸鱼看书"
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "NovelReader"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -35,9 +34,7 @@ DEFAULT_CONFIG = {
 }
 
 
-# ── 工具函数 ───────────────────────────────────────────
-def html_to_text(html_str: str) -> str:
-    """把 HTML 片段转纯文本，保留段落换行"""
+def html_to_text(html_str):
     if not html_str:
         return ""
     try:
@@ -70,7 +67,7 @@ def html_to_text(html_str: str) -> str:
         return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-def load_config() -> dict:
+def load_config():
     cfg = dict(DEFAULT_CONFIG)
     if CONFIG_FILE.exists():
         try:
@@ -81,13 +78,13 @@ def load_config() -> dict:
     return cfg
 
 
-def save_config(cfg: dict):
+def save_config(cfg):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 
-def load_progress() -> dict:
+def load_progress():
     if PROGRESS_FILE.exists():
         try:
             with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
@@ -97,25 +94,23 @@ def load_progress() -> dict:
     return {}
 
 
-def save_progress(data: dict):
+def save_progress(data):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-# ── EPUB 加载器 ────────────────────────────────────────
 class EpubLoader:
     def __init__(self):
         self.book = None
-        self.chapters = []  # [(title, text), ...]
-        self.toc = []       # [(title, chapter_index), ...]
+        self.chapters = []
+        self.toc = []
 
-    def load(self, filepath: str):
+    def load(self, filepath):
         self.book = epub.read_epub(filepath)
         self.chapters = []
         self.toc = []
 
-        # 提取目录结构（递归处理嵌套目录）
         toc_titles = {}
         try:
             def _collect_toc(items):
@@ -132,7 +127,6 @@ class EpubLoader:
                 if isinstance(item, epub.Link):
                     toc_titles[item.href.split("#")[0]] = item.title
 
-        # 按 spine 顺序提取章节
         seen_titles = set()
         spine_ids = [item[0] for item in self.book.spine]
 
@@ -157,7 +151,6 @@ class EpubLoader:
                     pass
             if not title:
                 title = f"第 {len(self.chapters) + 1} 章"
-
             if title in seen_titles:
                 title = f"{title} ({len(self.chapters) + 1})"
             seen_titles.add(title)
@@ -166,16 +159,15 @@ class EpubLoader:
             self.chapters.append((title, text))
             self.toc.append((title, idx))
 
-    def get_chapter_count(self) -> int:
+    def get_chapter_count(self):
         return len(self.chapters)
 
-    def get_chapter(self, index: int) -> tuple:
+    def get_chapter(self, index):
         if 0 <= index < len(self.chapters):
             return self.chapters[index]
         return ("", "")
 
 
-# ── 阅读器主窗口 ───────────────────────────────────────
 class ReaderApp:
     def __init__(self):
         self.cfg = load_config()
@@ -201,7 +193,6 @@ class ReaderApp:
         self._build_status_bar()
         self._bind_events()
 
-        # 恢复上次打开的书
         last_book = self.progress.get("last_book", "")
         if last_book and os.path.exists(last_book):
             self._open_book(last_book)
@@ -225,8 +216,7 @@ class ReaderApp:
         view_menu.add_command(label="背景色...", command=self._pick_bg_color)
         menubar.add_cascade(label="视图", menu=view_menu)
 
-        self._toc_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="目录", menu=self._toc_menu)
+        menubar.add_command(label="目录", command=self._show_toc_panel)
 
         help_menu = tk.Menu(menubar, tearoff=0)
         help_menu.add_command(label="快捷键说明", command=self._show_help)
@@ -261,20 +251,13 @@ class ReaderApp:
         frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
 
         self.text = tk.Text(
-            frame,
-            wrap=tk.WORD,
+            frame, wrap=tk.WORD,
             font=(self.cfg["font_family"], self.cfg["font_size"]),
-            bg=self.cfg["bg_color"],
-            fg=self.cfg["fg_color"],
-            relief=tk.FLAT,
-            padx=8,
-            pady=6,
-            spacing1=0,
-            spacing3=0,
-            state=tk.DISABLED,
-            cursor="arrow",
-            selectbackground="#b0c4de",
-            selectforeground=self.cfg["fg_color"],
+            bg=self.cfg["bg_color"], fg=self.cfg["fg_color"],
+            relief=tk.FLAT, padx=8, pady=6,
+            spacing1=0, spacing3=0,
+            state=tk.DISABLED, cursor="arrow",
+            selectbackground="#b0c4de", selectforeground=self.cfg["fg_color"],
         )
         self.text.pack(fill=tk.BOTH, expand=True)
         self._update_line_spacing()
@@ -307,7 +290,7 @@ class ReaderApp:
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_quit)
 
-        # 鼠标离开自动变透明（用 after 定时检测鼠标坐标，不用事件绑定）
+        # 鼠标离开自动变淡
         self._fade_alpha = self.cfg["opacity"]
         self._ghost_alpha = 0.15
         self._mouse_in = True
@@ -331,7 +314,7 @@ class ReaderApp:
         if path:
             self._open_book(path)
 
-    def _open_book(self, path: str):
+    def _open_book(self, path):
         try:
             self.loader.load(path)
         except Exception as e:
@@ -350,14 +333,55 @@ class ReaderApp:
         self.root.title(f"{APP_NAME} - {os.path.basename(path)}")
 
     def _rebuild_toc_menu(self):
-        self._toc_menu.delete(0, tk.END)
         chapter_titles = [t for t, _ in self.loader.toc]
         self._chapter_combo["values"] = chapter_titles
-        for title, idx in self.loader.toc:
-            self._toc_menu.add_command(
-                label=title[:40],
-                command=lambda i=idx: self._load_chapter(i),
-            )
+
+    def _show_toc_panel(self):
+        if not self.loader.toc:
+            return
+        win = tk.Toplevel(self.root)
+        win.title("目录")
+        win.geometry("350x500")
+        win.attributes("-topmost", True)
+
+        search_var = tk.StringVar()
+        search_entry = tk.Entry(win, textvariable=search_var, font=("微软雅黑", 10))
+        search_entry.pack(fill=tk.X, padx=6, pady=(6, 2))
+
+        listbox = tk.Listbox(win, font=("微软雅黑", 10), activestyle="none")
+        listbox.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
+
+        toc_data = list(self.loader.toc)
+        for title, _ in toc_data:
+            listbox.insert(tk.END, title)
+
+        for i, (_, idx) in enumerate(toc_data):
+            if idx == self.current_chapter:
+                listbox.selection_set(i)
+                listbox.see(i)
+                break
+
+        def on_select(event=None):
+            sel = listbox.curselection()
+            if sel:
+                # 从显示的列表找对应的 toc_data 索引
+                clicked_title = listbox.get(sel[0])
+                for title, idx in toc_data:
+                    if title == clicked_title:
+                        self._load_chapter(idx)
+                        win.destroy()
+                        return
+        listbox.bind("<Double-Button-1>", on_select)
+
+        def on_search(*args):
+            keyword = search_var.get().strip().lower()
+            listbox.delete(0, tk.END)
+            for title, idx in toc_data:
+                if not keyword or keyword in title.lower():
+                    listbox.insert(tk.END, title)
+        search_var.trace_add("write", on_search)
+
+        search_entry.focus_set()
 
     def _on_chapter_select(self, event=None):
         sel = self._chapter_combo.current()
@@ -366,7 +390,7 @@ class ReaderApp:
             if idx != self.current_chapter:
                 self._load_chapter(idx)
 
-    def _load_chapter(self, chapter_idx: int):
+    def _load_chapter(self, chapter_idx):
         if not self.loader.chapters:
             return
         chapter_idx = max(0, min(chapter_idx, len(self.loader.chapters) - 1))
@@ -410,6 +434,26 @@ class ReaderApp:
         if self.current_chapter < self.loader.get_chapter_count() - 1:
             self._load_chapter(self.current_chapter + 1)
 
+    # ── 透明度 ─────────────────────────────────────────
+    def _check_mouse_hover(self):
+        try:
+            x = self.root.winfo_pointerx()
+            y = self.root.winfo_pointery()
+            wx = self.root.winfo_rootx()
+            wy = self.root.winfo_rooty()
+            ww = self.root.winfo_width()
+            wh = self.root.winfo_height()
+            inside = wx <= x <= wx + ww and wy <= y <= wy + wh
+            if inside and not self._mouse_in:
+                self._mouse_in = True
+                self.root.attributes("-alpha", self._fade_alpha)
+            elif not inside and self._mouse_in:
+                self._mouse_in = False
+                self.root.attributes("-alpha", self._ghost_alpha)
+        except Exception:
+            pass
+        self.root.after(200, self._check_mouse_hover)
+
     # ── 设置 ────────────────────────────────────────────
     def _toggle_topmost(self):
         val = self._topmost_var.get()
@@ -417,7 +461,7 @@ class ReaderApp:
         self.cfg["always_on_top"] = val
         save_config(self.cfg)
 
-    def _change_font_size(self, delta: int):
+    def _change_font_size(self, delta):
         new_size = max(10, min(32, self.cfg["font_size"] + delta))
         self.cfg["font_size"] = new_size
         self.text.config(font=(self.cfg["font_family"], new_size))
@@ -439,7 +483,7 @@ class ReaderApp:
     def _show_help(self):
         messagebox.showinfo("快捷键", """快捷键说明
 
-Ctrl+O    打开 EPUB 文件
+Ctrl+O    打开 EPUB
 Ctrl++    字体放大
 Ctrl+-    字体缩小
 Ctrl+Q    退出
@@ -450,7 +494,6 @@ PageUp/Down  翻页
 Space     下一页
 """)
 
-    # ── 进度保存 ────────────────────────────────────────
     def _save_progress(self):
         if not self.current_book_path:
             return
@@ -475,25 +518,6 @@ Space     下一页
     def _on_quit(self):
         self._save_progress()
         self.root.destroy()
-
-    def _check_mouse_hover(self):
-        try:
-            x = self.root.winfo_pointerx()
-            y = self.root.winfo_pointery()
-            wx = self.root.winfo_rootx()
-            wy = self.root.winfo_rooty()
-            ww = self.root.winfo_width()
-            wh = self.root.winfo_height()
-            inside = wx <= x <= wx + ww and wy <= y <= wy + wh
-            if inside and not self._mouse_in:
-                self._mouse_in = True
-                self.root.attributes("-alpha", self._fade_alpha)
-            elif not inside and self._mouse_in:
-                self._mouse_in = False
-                self.root.attributes("-alpha", self._ghost_alpha)
-        except Exception:
-            pass
-        self.root.after(200, self._check_mouse_hover)
 
     def run(self):
         self.root.mainloop()
