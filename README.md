@@ -30,8 +30,11 @@
 
 ```bash
 pip install ebooklib
-python reader.py
 ```
+
+然后双击 `启动摸鱼看书.bat`（无黑框）
+
+或者命令行运行：`python reader.py`
 
 ## 依赖
 
