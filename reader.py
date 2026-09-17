@@ -284,6 +284,7 @@ class ReaderApp:
         self.text.bind("<Up>", lambda e: (self._scroll_view(-1), "break")[1])
         self.text.bind("<Down>", lambda e: (self._scroll_view(1), "break")[1])
         self.text.bind("<space>", lambda e: (self._scroll_view(1), "break")[1])
+        self.text.bind("<Escape>", lambda e: self.root.iconify())
 
         self.text.bind("<MouseWheel>", self._on_mousewheel)
         self.text.bind("<Button-1>", lambda e: self.text.focus_set())
