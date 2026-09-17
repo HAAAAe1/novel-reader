@@ -493,6 +493,7 @@ Ctrl+Q    退出
 ↑ ↓ / 滚轮  平滑滚动
 PageUp/Down  翻页
 Space     下一页
+Escape    最小化窗口
 """)
 
     def _save_progress(self):
