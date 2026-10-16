@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""摸鱼看小说神器 - EPUB阅读器"""
+"""摸鱼看小说神器 - EPUB/TXT 阅读器"""
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, font as tkfont, ttk
@@ -7,6 +7,7 @@ import json
 import os
 import re
 import html
+import sys
 from pathlib import Path
 
 try:
@@ -14,7 +15,10 @@ try:
     from ebooklib import epub
     from lxml import etree
 except ImportError:
-    raise SystemExit("需要安装 ebooklib: pip install ebooklib")
+    # ebooklib 只有读 EPUB 才需要；只看 TXT 不装它也能用
+    ebooklib = None
+    epub = None
+    etree = None
 
 APP_NAME = "摸鱼看书"
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "NovelReader"
@@ -107,6 +111,8 @@ class EpubLoader:
         self.toc = []
 
     def load(self, filepath):
+        if epub is None:
+            raise RuntimeError("未安装 ebooklib，无法读取 EPUB（先执行 pip install ebooklib）")
         self.book = epub.read_epub(filepath)
         self.chapters = []
         self.toc = []
@@ -168,11 +174,152 @@ class EpubLoader:
         return ("", "")
 
 
+# 章节标题：「第X章/回/节/卷/集/部/篇」单独成行（标题里不带句号等）
+CHAPTER_RE = re.compile(
+    r"^\s*(第\s*[0-9０-９零〇一二三四五六七八九十百千万两]+\s*"
+    r"[章回节卷集部篇][^。！？\n]{0,30})\s*$"
+)
+
+
+def decode_text(data):
+    """自动识别 txt 编码：BOM → UTF-16 → UTF-8 → GB18030。"""
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16", errors="replace")
+    if data[:3] == b"\xef\xbb\xbf":
+        return data.decode("utf-8-sig", errors="replace")
+    sample = data[:4000] or data
+    if sample.count(0) > len(sample) // 4:
+        # 无 BOM 的 UTF-16：按空字节在奇偶位猜字节序
+        le = sum(1 for b in sample[1::2] if b == 0)
+        be = sum(1 for b in sample[0::2] if b == 0)
+        try:
+            return data.decode("utf-16-le" if le >= be else "utf-16-be")
+        except UnicodeDecodeError:
+            pass
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            return data.decode("gb18030")
+        except UnicodeDecodeError:
+            return data.decode("utf-8", errors="replace")
+
+
+class TxtLoader:
+    """纯文本加载：自动识别编码，按「第X章」等标题切分章节。"""
+
+    def __init__(self):
+        self.chapters = []
+        self.toc = []
+
+    def load(self, filepath):
+        self.chapters = []
+        self.toc = []
+        text = Path(filepath).read_bytes()
+        text = decode_text(text)
+        text = text.replace("\r\n", "\n").replace("\r", "\n").strip("\ufeff \t\n")
+
+        chapters = self._split_by_headings(text)
+        if len(chapters) < 2:
+            chapters = self._split_by_size(text)
+
+        seen = set()
+        for title, body in chapters:
+            body = body.strip()
+            if not body:
+                continue
+            if title in seen:
+                title = f"{title} ({len(self.chapters) + 1})"
+            seen.add(title)
+            idx = len(self.chapters)
+            self.chapters.append((title, body))
+            self.toc.append((title, idx))
+
+    def _split_by_headings(self, text):
+        parts = []
+        title = None
+        buf = []
+        for line in text.split("\n"):
+            m = CHAPTER_RE.match(line)
+            if m:
+                if buf:
+                    parts.append((title or "前言", "\n".join(buf)))
+                    buf = []
+                title = re.sub(r"\s+", " ", m.group(1)).strip()
+            else:
+                buf.append(line)
+        if buf:
+            parts.append((title or "正文", "\n".join(buf)))
+        return [(t, b) for t, b in parts if b.strip()]
+
+    def _split_by_size(self, text, target=1800):
+        """找不到章节标题时，按段落把长文切成若干节。"""
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+        segs = []
+        if paragraphs:
+            segs = self._pack(paragraphs, "\n\n", target)
+        if len(segs) <= 1:
+            # 没有空行分隔的整块长文，退回按行切
+            lines = [l.strip() for l in text.split("\n") if l.strip()]
+            segs = self._pack(lines, "\n", target)
+        return [(f"第 {i + 1} 节", s) for i, s in enumerate(segs)]
+
+    @staticmethod
+    def _pack(items, sep, target):
+        segs, buf, size = [], [], 0
+        for item in items:
+            if size and size + len(item) > target:
+                segs.append(sep.join(buf))
+                buf, size = [], 0
+            buf.append(item)
+            size += len(item)
+        if buf:
+            segs.append(sep.join(buf))
+        return segs
+
+
+class BookLoader:
+    """按扩展名/文件头自动选择 EPUB 或 TXT 加载器。"""
+
+    def __init__(self):
+        self.chapters = []
+        self.toc = []
+
+    def load(self, filepath):
+        loader = self._pick_loader(filepath)
+        loader.load(filepath)
+        self.chapters = loader.chapters
+        self.toc = loader.toc
+
+    @staticmethod
+    def _pick_loader(filepath):
+        ext = Path(filepath).suffix.lower()
+        if ext == ".epub":
+            return EpubLoader()
+        if ext in (".txt", ".text"):
+            return TxtLoader()
+        # 未知扩展名：按文件头猜（EPUB 本质是 zip）
+        try:
+            with open(filepath, "rb") as f:
+                magic = f.read(2)
+        except OSError:
+            magic = b""
+        return EpubLoader() if magic == b"PK" else TxtLoader()
+
+    def get_chapter_count(self):
+        return len(self.chapters)
+
+    def get_chapter(self, index):
+        if 0 <= index < len(self.chapters):
+            return self.chapters[index]
+        return ("", "")
+
+
 class ReaderApp:
     def __init__(self):
         self.cfg = load_config()
         self.progress = load_progress()
-        self.loader = EpubLoader()
+        self.loader = BookLoader()
         self.current_chapter = 0
         self.current_book_path = ""
 
@@ -201,7 +348,7 @@ class ReaderApp:
         menubar = tk.Menu(self.root)
 
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="打开 EPUB...", command=self._on_open, accelerator="Ctrl+O")
+        file_menu.add_command(label="打开书籍...", command=self._on_open, accelerator="Ctrl+O")
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self._on_quit)
         menubar.add_cascade(label="文件", menu=file_menu)
@@ -234,7 +381,7 @@ class ReaderApp:
         self._btn_prev = tk.Button(tb, text="◀", command=self._prev_chapter, **btn_style)
         self._btn_prev.pack(side=tk.LEFT)
 
-        self._chapter_var = tk.StringVar(value="请打开 EPUB 文件")
+        self._chapter_var = tk.StringVar(value="请打开 EPUB/TXT 书籍")
         self._chapter_combo = ttk.Combobox(tb, textvariable=self._chapter_var,
                                            state="readonly", width=30, font=("微软雅黑", 9))
         self._chapter_combo.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=4)
@@ -309,8 +456,13 @@ class ReaderApp:
     # ── 书操作 ──────────────────────────────────────────
     def _on_open(self):
         path = filedialog.askopenfilename(
-            title="打开 EPUB 文件",
-            filetypes=[("EPUB 文件", "*.epub"), ("所有文件", "*.*")],
+            title="打开电子书",
+            filetypes=[
+                ("电子书", "*.epub *.txt *.text"),
+                ("EPUB 文件", "*.epub"),
+                ("TXT 文件", "*.txt"),
+                ("所有文件", "*.*"),
+            ],
         )
         if path:
             self._open_book(path)
@@ -321,7 +473,7 @@ class ReaderApp:
         except Exception as e:
             import traceback
             err = traceback.format_exc()
-            messagebox.showerror("打开失败", f"无法读取 EPUB 文件:\n{e}\n\n{err[-500:]}")
+            messagebox.showerror("打开失败", f"无法读取文件:\n{e}\n\n{err[-500:]}")
             return
 
         self.current_book_path = path
@@ -484,7 +636,7 @@ class ReaderApp:
     def _show_help(self):
         messagebox.showinfo("快捷键", """快捷键说明
 
-Ctrl+O    打开 EPUB
+Ctrl+O    打开书籍（EPUB/TXT）
 Ctrl++    字体放大
 Ctrl+-    字体缩小
 Ctrl+Q    退出
@@ -527,4 +679,7 @@ Escape    最小化窗口
 
 if __name__ == "__main__":
     app = ReaderApp()
+    # 拖文件到快捷方式/命令行传参可直接打开
+    if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
+        app._open_book(sys.argv[1])
     app.run()
