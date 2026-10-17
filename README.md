@@ -4,6 +4,7 @@
 
 ## 特性
 
+- **免 Python 独立版** — Releases 提供单文件 exe，双击即用
 - **EPUB + TXT 双格式** — TXT 自动识别编码（UTF-8/GB18030/UTF-16），按「第X章/回/节」自动切章；拖文件到快捷方式可直接打开
 - **窗口随意缩放** — 最小 120×100，缩到任务栏旁边看
 - **鼠标离开自动变淡** — 鼠标移出窗口后透明度降到 15%，就是个淡淡的影子
@@ -30,6 +31,13 @@
 
 ## 使用方法
 
+### 免 Python 独立版（推荐）
+
+到 [Releases](https://github.com/HAAAAe1/novel-reader/releases) 下载 `novel-reader-vX.Y.Z.exe`，
+双击即用，无需安装任何东西。
+
+### 源码运行
+
 1. 安装 Python 3.x
 2. 双击 `启动摸鱼看书.bat`（自动安装依赖，无黑框）
 
@@ -39,6 +47,15 @@ pip install ebooklib
 python reader.py
 ```
 
+### 构建独立版
+
+需要 Python（含 tkinter/ebooklib/lxml）+ PyInstaller：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build_exe.ps1
+# 产出 dist\摸鱼看书.exe
+```
+
 ## 截图
 
 窗口很小，鼠标离开后自动变淡：
@@ -46,6 +63,10 @@ python reader.py
 ![screenshot](https://github.com/HAAAAe1/novel-reader/raw/master/screenshot.png)
 
 ## 依赖
+
+独立版（exe）：无
+
+源码运行：
 
 - Python 3.x
 - tkinter（内置）
