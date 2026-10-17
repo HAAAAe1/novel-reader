@@ -1,14 +1,54 @@
 # -*- coding: utf-8 -*-
 """摸鱼看小说神器 - EPUB/TXT 阅读器"""
 
-import tkinter as tk
-from tkinter import filedialog, messagebox, font as tkfont, ttk
 import json
 import os
 import re
 import html
 import sys
+import time
+import traceback
+import ctypes
 from pathlib import Path
+
+APP_NAME = "摸鱼看书"
+CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "NovelReader"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+PROGRESS_FILE = CONFIG_DIR / "progress.json"
+LOG_FILE = CONFIG_DIR / "error.log"
+
+
+def log_error(msg):
+    """写 %APPDATA%\\NovelReader\\error.log：pythonw/独立版下没有控制台，文件是唯一可靠出口。"""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(msg.rstrip() + "\n" + "-" * 60 + "\n")
+    except Exception:
+        pass
+
+
+def fatal(msg):
+    """GUI 可能根本不可用：只用 Win32 MessageBox + 文件日志兜底，绝不能无声退出。"""
+    log_error(msg)
+    try:
+        ctypes.windll.user32.MessageBoxW(None, msg[-1800:], f"{APP_NAME} - 启动失败", 0x10)
+    except Exception:
+        pass
+    sys.exit(1)
+
+
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, font as tkfont, ttk
+except Exception:
+    fatal(
+        "tkinter 不可用，界面无法创建。\n\n"
+        f"当前解释器：{sys.executable}\n"
+        f"Python：{sys.version.split()[0]}\n\n"
+        "请使用带 tcl/tk 的 Python 3（安装时勾选 tcl/tk and IDLE）。\n\n"
+        + traceback.format_exc()
+    )
 
 try:
     import ebooklib
@@ -20,11 +60,6 @@ except ImportError:
     epub = None
     etree = None
 
-APP_NAME = "摸鱼看书"
-CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "NovelReader"
-CONFIG_FILE = CONFIG_DIR / "config.json"
-PROGRESS_FILE = CONFIG_DIR / "progress.json"
-
 DEFAULT_CONFIG = {
     "font_family": "微软雅黑",
     "font_size": 14,
@@ -35,6 +70,7 @@ DEFAULT_CONFIG = {
     "height": 600,
     "always_on_top": False,
     "opacity": 0.95,
+    "ghost_alpha": 0.35,
 }
 
 
@@ -112,7 +148,11 @@ class EpubLoader:
 
     def load(self, filepath):
         if epub is None:
-            raise RuntimeError("未安装 ebooklib，无法读取 EPUB（先执行 pip install ebooklib）")
+            raise RuntimeError(
+                "EPUB 需要 ebooklib，当前解释器没有安装。\n"
+                f'请在命令行执行：\n  "{sys.executable}" -m pip install ebooklib\n'
+                "（TXT 无需该依赖，可直接打开）"
+            )
         self.book = epub.read_epub(filepath)
         self.chapters = []
         self.toc = []
@@ -139,6 +179,12 @@ class EpubLoader:
         for item_id in spine_ids:
             item = self.book.get_item_with_id(item_id)
             if item is None:
+                continue
+            # EPUB3 导航文档不是正文，跳过。
+            # 证据：ebooklib 读回的 nav 项 type=EpubNav 但 .properties 不回填（OPF 里明明有）
+            # 所以三种判定一起上：properties / EpubNav 类型 / 惯例 id。
+            props = getattr(item, "properties", None) or []
+            if "nav" in props or isinstance(item, epub.EpubNav) or item.id == "nav":
                 continue
             content = item.get_content().decode("utf-8", errors="replace")
             text = html_to_text(content)
@@ -329,6 +375,7 @@ class ReaderApp:
     def _build_ui(self):
         self.root = tk.Tk()
         self.root.title(APP_NAME)
+        self.root.report_callback_exception = _report_callback_exception
         self.root.configure(bg=self.cfg["bg_color"])
         self.root.attributes("-topmost", self.cfg["always_on_top"])
         self.root.attributes("-alpha", self.cfg["opacity"])
@@ -438,11 +485,12 @@ class ReaderApp:
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_quit)
 
-        # 鼠标离开自动变淡
+        # 鼠标离开自动变淡；首次进入前/窗口有焦点时不变淡（0.15 太像"没启动"）
         self._fade_alpha = self.cfg["opacity"]
-        self._ghost_alpha = 0.15
+        self._ghost_alpha = float(self.cfg.get("ghost_alpha", 0.35))
         self._mouse_in = True
-        self._check_mouse_hover()
+        self._ever_seen = False
+        self.root.after(1200, self._check_mouse_hover)
 
     def _restore_geometry(self):
         w = self.cfg.get("width", 400)
@@ -471,9 +519,9 @@ class ReaderApp:
         try:
             self.loader.load(path)
         except Exception as e:
-            import traceback
-            err = traceback.format_exc()
-            messagebox.showerror("打开失败", f"无法读取文件:\n{e}\n\n{err[-500:]}")
+            # 对话框只给人能读的话，完整 traceback 进 error.log
+            log_error(f"打开失败：{path}\n{traceback.format_exc()}")
+            messagebox.showerror("打开失败", f"无法读取文件：\n{path}\n\n{e}")
             return
 
         self.current_book_path = path
@@ -597,10 +645,13 @@ class ReaderApp:
             ww = self.root.winfo_width()
             wh = self.root.winfo_height()
             inside = wx <= x <= wx + ww and wy <= y <= wy + wh
-            if inside and not self._mouse_in:
+            if inside:
+                self._ever_seen = True
+            # 鼠标在窗内、窗口有焦点、或还没被"抛弃"过 → 保持可见
+            if inside or self.root.focus_displayof() is not None or not self._ever_seen:
                 self._mouse_in = True
                 self.root.attributes("-alpha", self._fade_alpha)
-            elif not inside and self._mouse_in:
+            elif self._mouse_in:
                 self._mouse_in = False
                 self.root.attributes("-alpha", self._ghost_alpha)
         except Exception:
@@ -677,9 +728,41 @@ Escape    最小化窗口
         self.root.mainloop()
 
 
+def _excepthook(exc_type, exc, tb):
+    fatal("未捕获异常：\n\n" + "".join(traceback.format_exception(exc_type, exc, tb)))
+
+
+def _report_callback_exception(exc, val, tb):
+    """Tk 回调异常不走 excepthook，pythonw 下默认零输出 → 必须自己落日志+弹框（不退出）。"""
+    text = "".join(traceback.format_exception(exc, val, tb))
+    log_error(f"GUI 回调异常：\n{text}")
+    try:
+        ctypes.windll.user32.MessageBoxW(None, text[-1800:], f"{APP_NAME} - 界面错误", 0x10)
+    except Exception:
+        pass
+
+
+def main(argv=None):
+    sys.excepthook = _excepthook
+    argv = list(sys.argv[1:]) if argv is None else list(argv)
+    # 启动上下文进日志：下次再"没反应"，看一眼 error.log 就知道跑在哪、带了什么参数
+    log_error(
+        f"START {time.strftime('%Y-%m-%d %H:%M:%S')} | exe={sys.executable} | "
+        f"py={sys.version.split()[0]} | frozen={getattr(sys, 'frozen', False)} | argv={argv}"
+    )
+    try:
+        app = ReaderApp()
+        # 拖文件到快捷方式/命令行传参：取第一个存在的文件
+        for arg in argv:
+            if os.path.exists(arg):
+                app._open_book(arg)
+                break
+        app.run()
+    except Exception:
+        _excepthook(*sys.exc_info())
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
-    app = ReaderApp()
-    # 拖文件到快捷方式/命令行传参可直接打开
-    if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
-        app._open_book(sys.argv[1])
-    app.run()
+    sys.exit(main())
