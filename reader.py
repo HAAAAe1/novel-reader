@@ -69,7 +69,8 @@ DEFAULT_CONFIG = {
     "width": 400,
     "height": 600,
     "always_on_top": False,
-    "opacity": 0.95,
+    "opacity": 0.95,        # 鼠标在窗口内时的透明度
+    "ghost_alpha": 0.15,    # 鼠标移开后变淡到的透明度
 }
 
 
@@ -407,6 +408,8 @@ class ReaderApp:
         view_menu.add_command(label="字体缩小", command=lambda: self._change_font_size(-1), accelerator="Ctrl+-")
         view_menu.add_separator()
         view_menu.add_command(label="背景色...", command=self._pick_bg_color)
+        view_menu.add_separator()
+        view_menu.add_command(label="透明度...", command=self._open_opacity_dialog)
         menubar.add_cascade(label="视图", menu=view_menu)
 
         menubar.add_command(label="目录", command=self._show_toc_panel)
@@ -486,7 +489,8 @@ class ReaderApp:
 
         # 鼠标离开自动变淡
         self._fade_alpha = self.cfg["opacity"]
-        self._ghost_alpha = 0.15
+        self._ghost_alpha = self.cfg["ghost_alpha"]
+        self._fade_paused = False
         self._mouse_in = True
         self._check_mouse_hover()
 
@@ -636,19 +640,20 @@ class ReaderApp:
     # ── 透明度 ─────────────────────────────────────────
     def _check_mouse_hover(self):
         try:
-            x = self.root.winfo_pointerx()
-            y = self.root.winfo_pointery()
-            wx = self.root.winfo_rootx()
-            wy = self.root.winfo_rooty()
-            ww = self.root.winfo_width()
-            wh = self.root.winfo_height()
-            inside = wx <= x <= wx + ww and wy <= y <= wy + wh
-            if inside and not self._mouse_in:
-                self._mouse_in = True
-                self.root.attributes("-alpha", self._fade_alpha)
-            elif not inside and self._mouse_in:
-                self._mouse_in = False
-                self.root.attributes("-alpha", self._ghost_alpha)
+            if not self._fade_paused:
+                x = self.root.winfo_pointerx()
+                y = self.root.winfo_pointery()
+                wx = self.root.winfo_rootx()
+                wy = self.root.winfo_rooty()
+                ww = self.root.winfo_width()
+                wh = self.root.winfo_height()
+                inside = wx <= x <= wx + ww and wy <= y <= wy + wh
+                if inside and not self._mouse_in:
+                    self._mouse_in = True
+                    self.root.attributes("-alpha", self._fade_alpha)
+                elif not inside and self._mouse_in:
+                    self._mouse_in = False
+                    self.root.attributes("-alpha", self._ghost_alpha)
         except Exception:
             pass
         self.root.after(200, self._check_mouse_hover)
@@ -675,6 +680,76 @@ class ReaderApp:
             self.text.config(bg=color[1])
             save_config(self.cfg)
 
+    # ── 透明度调节 ─────────────────────────────────────
+    def _open_opacity_dialog(self):
+        """两个滑条：正常显示时的透明度 + 鼠标移开后的透明度。拖动即生效，关窗自动保存。"""
+        win = tk.Toplevel(self.root)
+        win.title("透明度")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        win.configure(bg=self.cfg["bg_color"])
+
+        # 调节期间暂停"移开变淡"，否则鼠标移到对话框上主窗口就隐身了，没法所见即所得
+        self._fade_paused = True
+        self.root.attributes("-alpha", self._fade_alpha)
+
+        panel = tk.Frame(win, bg=self.cfg["bg_color"], padx=12, pady=10)
+        panel.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(panel, text="窗口透明度（鼠标在窗口内）", bg=self.cfg["bg_color"],
+                 fg=self.cfg["fg_color"], font=("微软雅黑", 9)).pack(anchor="w")
+        s_norm = tk.Scale(panel, from_=100, to=30, orient=tk.HORIZONTAL, length=240,
+                          showvalue=True, bg=self.cfg["bg_color"], fg=self.cfg["fg_color"],
+                          highlightthickness=0, font=("微软雅黑", 9),
+                          command=lambda v: self._set_opacity(int(v) / 100))
+        s_norm.set(round(self.cfg["opacity"] * 100))
+        s_norm.pack(fill=tk.X)
+
+        tk.Label(panel, text="移开后透明度（鼠标离开窗口）", bg=self.cfg["bg_color"],
+                 fg=self.cfg["fg_color"], font=("微软雅黑", 9)).pack(anchor="w", pady=(8, 0))
+        s_ghost = tk.Scale(panel, from_=60, to=5, orient=tk.HORIZONTAL, length=240,
+                           showvalue=True, bg=self.cfg["bg_color"], fg=self.cfg["fg_color"],
+                           highlightthickness=0, font=("微软雅黑", 9),
+                           command=lambda v: self._set_ghost_alpha(int(v) / 100))
+        s_ghost.set(round(self.cfg["ghost_alpha"] * 100))
+        s_ghost.pack(fill=tk.X)
+
+        tk.Label(panel, text="默认 95% / 15%，改动会记住", bg=self.cfg["bg_color"],
+                 fg="#888888", font=("微软雅黑", 8)).pack(anchor="w", pady=(6, 0))
+
+        def on_close():
+            self._fade_paused = False
+            try:
+                self.root.attributes(
+                    "-alpha", self._fade_alpha if self._mouse_in else self._ghost_alpha)
+            except Exception:
+                pass
+            save_config(self.cfg)
+            win.destroy()
+
+        btn = tk.Button(panel, text="关闭", command=on_close, font=("微软雅黑", 9),
+                        bg=self.cfg["bg_color"], fg=self.cfg["fg_color"], relief="flat", padx=10)
+        btn.pack(anchor="e", pady=(8, 0))
+        win.protocol("WM_DELETE_WINDOW", on_close)
+
+    def _set_opacity(self, val):
+        """正常显示（鼠标在窗口内）的透明度。val: 0.3~1.0"""
+        val = max(0.3, min(1.0, round(val, 2)))
+        self.cfg["opacity"] = val
+        self._fade_alpha = val
+        if getattr(self, "_mouse_in", True):
+            self.root.attributes("-alpha", val)
+        save_config(self.cfg)
+
+    def _set_ghost_alpha(self, val):
+        """鼠标移开后变淡到的透明度。val: 0.05~0.6"""
+        val = max(0.05, min(0.6, round(val, 2)))
+        self.cfg["ghost_alpha"] = val
+        self._ghost_alpha = val
+        if getattr(self, "_mouse_in", True) is False:
+            self.root.attributes("-alpha", val)
+        save_config(self.cfg)
+
     def _update_line_spacing(self):
         spacing = int(self.cfg["font_size"] * (self.cfg["line_spacing"] - 1))
         self.text.config(spacing1=0, spacing2=spacing, spacing3=0)
@@ -692,6 +767,9 @@ Ctrl+Q    退出
 PageUp/Down  翻页
 Space     下一页
 Escape    最小化窗口
+
+透明度可在「视图 → 透明度...」里调节
+（默认 95% / 移开后 15%）
 """)
 
     def _save_progress(self):
