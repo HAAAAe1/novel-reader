@@ -70,7 +70,6 @@ DEFAULT_CONFIG = {
     "height": 600,
     "always_on_top": False,
     "opacity": 0.95,
-    "ghost_alpha": 0.35,
 }
 
 
@@ -485,12 +484,11 @@ class ReaderApp:
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_quit)
 
-        # 鼠标离开自动变淡；首次进入前/窗口有焦点时不变淡（0.15 太像"没启动"）
+        # 鼠标离开自动变淡
         self._fade_alpha = self.cfg["opacity"]
-        self._ghost_alpha = float(self.cfg.get("ghost_alpha", 0.35))
+        self._ghost_alpha = 0.15
         self._mouse_in = True
-        self._ever_seen = False
-        self.root.after(1200, self._check_mouse_hover)
+        self._check_mouse_hover()
 
     def _restore_geometry(self):
         w = self.cfg.get("width", 400)
@@ -645,13 +643,10 @@ class ReaderApp:
             ww = self.root.winfo_width()
             wh = self.root.winfo_height()
             inside = wx <= x <= wx + ww and wy <= y <= wy + wh
-            if inside:
-                self._ever_seen = True
-            # 鼠标在窗内、窗口有焦点、或还没被"抛弃"过 → 保持可见
-            if inside or self.root.focus_displayof() is not None or not self._ever_seen:
+            if inside and not self._mouse_in:
                 self._mouse_in = True
                 self.root.attributes("-alpha", self._fade_alpha)
-            elif self._mouse_in:
+            elif not inside and self._mouse_in:
                 self._mouse_in = False
                 self.root.attributes("-alpha", self._ghost_alpha)
         except Exception:
