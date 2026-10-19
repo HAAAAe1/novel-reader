@@ -408,6 +408,7 @@ class ReaderApp:
         view_menu.add_command(label="字体缩小", command=lambda: self._change_font_size(-1), accelerator="Ctrl+-")
         view_menu.add_separator()
         view_menu.add_command(label="背景色...", command=self._pick_bg_color)
+        view_menu.add_command(label="恢复默认背景色", command=self._restore_default_color)
         view_menu.add_separator()
         view_menu.add_command(label="透明度...", command=self._open_opacity_dialog)
         menubar.add_cascade(label="视图", menu=view_menu)
@@ -679,6 +680,15 @@ class ReaderApp:
             self.root.configure(bg=color[1])
             self.text.config(bg=color[1])
             save_config(self.cfg)
+
+    def _restore_default_color(self):
+        """一键改回默认米黄 #f5f0e8（选色框里翻不到这个色，单给个入口）。"""
+        default_bg = DEFAULT_CONFIG["bg_color"]
+        self.cfg["bg_color"] = default_bg
+        self.root.configure(bg=default_bg)
+        self.text.config(bg=default_bg)
+        save_config(self.cfg)
+        self.status.config(text="背景色已恢复默认")
 
     # ── 透明度调节 ─────────────────────────────────────
     def _open_opacity_dialog(self):
