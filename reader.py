@@ -368,6 +368,14 @@ class ReaderApp:
         self.loader = BookLoader()
         self.current_chapter = 0
         self.current_book_path = ""
+        # 剩余字数：开书时算好每章字数（不含空白）+ 后缀和，之后查询 O(1)
+        self._chapter_lens = []
+        self._suffix = []
+        self._status_job = None   # 状态栏刷新去抖句柄
+        self._load_job = None     # 载章后延迟收尾（恢复滚动+刷新）的句柄
+        self._restore_scroll = None  # 开书时待恢复的滚动位置，一次性
+        self._restore_pending = None  # 等窗口映射完成后再设的滚动位置
+        self._restore_gen = 0     # 载章代号：切章后旧的延迟恢复一律作废
 
         self._build_ui()
         self._restore_geometry()
@@ -485,6 +493,8 @@ class ReaderApp:
 
         self.text.bind("<MouseWheel>", self._on_mousewheel)
         self.text.bind("<Button-1>", lambda e: self.text.focus_set())
+        # 窗口/文本区尺寸变化 → 视口顶端可能变行 → 去抖重算已读
+        self.text.bind("<Configure>", lambda e: self._schedule_status())
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_quit)
 
@@ -529,9 +539,12 @@ class ReaderApp:
 
         self.current_book_path = path
         self._rebuild_toc_menu()
+        self._compute_chapter_lens()
 
         book_progress = self.progress.get("books", {}).get(path, {})
         self.current_chapter = book_progress.get("chapter", 0)
+        # 只在开书时恢复滚动；切章不恢复（存的滚动值属于存档时那一章）
+        self._restore_scroll = book_progress.get("scroll", 0.0)
 
         self._load_chapter(self.current_chapter)
         self.root.title(f"{APP_NAME} - {os.path.basename(path)}")
@@ -539,6 +552,17 @@ class ReaderApp:
     def _rebuild_toc_menu(self):
         chapter_titles = [t for t, _ in self.loader.toc]
         self._chapter_combo["values"] = chapter_titles
+
+    def _compute_chapter_lens(self):
+        """每章字数（不含空白）+ 后缀和。开书算一次，之后全书剩余 O(1) 查询。"""
+        bodies = [body for _, body in self.loader.chapters]
+        self._chapter_lens = [len(re.sub(r"\s", "", b)) for b in bodies]
+        suffix = [0] * (len(bodies) + 1)
+        total = 0
+        for i in range(len(bodies) - 1, -1, -1):
+            total += self._chapter_lens[i]
+            suffix[i] = total
+        self._suffix = suffix
 
     def _show_toc_panel(self):
         if not self.loader.toc:
@@ -597,6 +621,9 @@ class ReaderApp:
     def _load_chapter(self, chapter_idx):
         if not self.loader.chapters:
             return
+        # 新的一章开始了：上一章挂起的滚动恢复/补设全部作废（它们属于旧章）
+        self._restore_pending = None
+        self._restore_gen = getattr(self, "_restore_gen", 0) + 1
         chapter_idx = max(0, min(chapter_idx, len(self.loader.chapters) - 1))
         self.current_chapter = chapter_idx
 
@@ -613,21 +640,69 @@ class ReaderApp:
         self.text.config(state=tk.DISABLED)
         self.text.see("1.0")
 
-        total_chapters = self.loader.get_chapter_count()
-        self.status.config(
-            text=f"第 {self.current_chapter + 1}/{total_chapters} 章  |  ← → 翻章  滚轮滚动"
-        )
-        self._save_progress()
+        # 开书时恢复上次滚动位置（一次性；切章时 _restore_scroll 为 None → 回章首）
+        frac = self._restore_scroll
+        self._restore_scroll = None
+        try:
+            frac = max(0.0, min(1.0, float(frac))) if frac is not None else 0.0
+        except (TypeError, ValueError):
+            frac = 0.0
+
+        # 恢复滚动后再刷新状态栏/存档：yview 要等 widget 完成一次布局才有真实尺寸
+        gen = self._restore_gen
+
+        def _after_load():
+            self._load_job = None
+            if gen != self._restore_gen:
+                return  # 期间切了章，本次收尾作废
+            if frac > 0:
+                self._restore_pending = frac
+                self._try_restore_scroll(gen)
+            else:
+                self._update_status()
+            self._save_progress()
+        if self._load_job is not None:
+            try:
+                self.root.after_cancel(self._load_job)
+            except Exception:
+                pass
+        self._load_job = self.root.after_idle(_after_load)
+
+    def _try_restore_scroll(self, gen):
+        """等窗口映射完成（布局尺寸已定）再设滚动位置。
+        在映射/resize 事件里直接 yview_moveto 会被 Text 类绑定随后的视图重算覆盖
+        （实测浮到 0.009），必须放在 after 定时器里、且 widget 已 mapped 时设置才粘得住。"""
+        if gen != self._restore_gen:
+            return
+        frac = self._restore_pending
+        if frac is None:
+            return
+        if not (self.text.winfo_ismapped() and self.text.winfo_height() > 1):
+            self.root.after(30, lambda: self._try_restore_scroll(gen))
+            return
+        self._restore_pending = None
+        self.text.yview_moveto(frac)
+        self._update_status()
+        # 迟到的 resize（DPI/几何微调）仍可能把比例冲掉 → 120ms 后补一次
+        self.root.after(120, lambda: self._reapply_scroll(gen, frac))
+
+    def _reapply_scroll(self, gen, frac):
+        if gen != self._restore_gen:
+            return
+        self.text.yview_moveto(frac)
+        self._update_status()
 
     # ── 滚动 ───────────────────────────────────────────
     def _scroll_view(self, direction):
         self.text.yview_scroll(direction, "units")
+        self._schedule_status()
 
     def _on_mousewheel(self, event):
         if event.delta > 0:
             self.text.yview_scroll(-2, "units")
         elif event.delta < 0:
             self.text.yview_scroll(2, "units")
+        self._schedule_status()
         return "break"
 
     def _prev_chapter(self):
@@ -637,6 +712,48 @@ class ReaderApp:
     def _next_chapter(self):
         if self.current_chapter < self.loader.get_chapter_count() - 1:
             self._load_chapter(self.current_chapter + 1)
+
+    # ── 剩余字数 / 状态栏 ──────────────────────────────
+    def _schedule_status(self):
+        """滚动时去抖 300ms 再刷状态栏，不逐帧算。"""
+        if self._status_job is not None:
+            try:
+                self.root.after_cancel(self._status_job)
+            except Exception:
+                pass
+        self._status_job = self.root.after(300, self._update_status)
+
+    def _update_status(self):
+        self._status_job = None
+        total = self.loader.get_chapter_count()
+        if not total:
+            self.status.config(text="就绪")
+            return
+        # 本章已读 = 视口顶端之前已滚过的非空白字数 + 当前屏可见字数 × 滚动进度
+        # （顶端=0 → 章首剩全章；底端进度=1 → 章底剩 0；中间平滑，非按比例粗估）
+        read = 0
+        try:
+            y0, y1 = self.text.yview()
+            max_top = 1.0 - (y1 - y0)  # 视口顶端能到达的最大分数
+            progress = 0.0 if max_top <= 1e-6 else min(1.0, max(0.0, y0 / max_top))
+            top = self.text.index("@0,0")
+            height = self.text.winfo_height()
+            bottom = self.text.index(f"@0,{height}") if height > 1 else top
+            above = len(re.sub(r"\s", "", self.text.get("1.0", top)))
+            visible = len(re.sub(r"\s", "", self.text.get(top, bottom)))
+            read = int(round(above + visible * progress))
+        except Exception:
+            pass
+        chap_total = self._chapter_lens[self.current_chapter] if self.current_chapter < len(self._chapter_lens) else 0
+        read = max(0, min(read, chap_total))
+        chap_remain = chap_total - read
+        # 全书剩余 = 本章剩余 + 之后章节（后缀和 O(1)）
+        after = self._suffix[self.current_chapter + 1] if self.current_chapter + 1 < len(self._suffix) else 0
+        book_remain = chap_remain + after
+        self.status.config(
+            text=(f"第 {self.current_chapter + 1}/{total} 章  |  "
+                  f"本章剩 {chap_remain:,} 字 · 全书剩 {book_remain:,} 字  |  ← → 翻章  滚轮滚动")
+        )
 
     # ── 透明度 ─────────────────────────────────────────
     def _check_mouse_hover(self):
@@ -671,6 +788,8 @@ class ReaderApp:
         self.cfg["font_size"] = new_size
         self.text.config(font=(self.cfg["font_family"], new_size))
         save_config(self.cfg)
+        # 排版变了，视口顶端所在行也变 → 已读数要重算
+        self._schedule_status()
 
     def _pick_bg_color(self):
         from tkinter import colorchooser
