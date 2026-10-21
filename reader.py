@@ -468,6 +468,14 @@ class ReaderApp:
         self._update_line_spacing()
 
     def _build_status_bar(self):
+        # 顶部字数条：菜单栏/工具栏下面一行，窗口缩多小都在顶部可见（底部状态栏会被裁掉）
+        self.top_status = tk.Label(
+            self.root, text="",
+            bg=self.cfg["bg_color"], fg="#888888",
+            font=("微软雅黑", 8), anchor="w", padx=6,
+        )
+        self.top_status.pack(fill=tk.X, side=tk.TOP)
+
         self.status = tk.Label(
             self.root, text="就绪",
             bg=self.cfg["bg_color"], fg="#888888",
@@ -728,6 +736,7 @@ class ReaderApp:
         total = self.loader.get_chapter_count()
         if not total:
             self.status.config(text="就绪")
+            self.top_status.config(text="")
             return
         # 本章已读 = 视口顶端之前已滚过的非空白字数 + 当前屏可见字数 × 滚动进度
         # （顶端=0 → 章首剩全章；底端进度=1 → 章底剩 0；中间平滑，非按比例粗估）
@@ -753,6 +762,10 @@ class ReaderApp:
         self.status.config(
             text=(f"第 {self.current_chapter + 1}/{total} 章  |  "
                   f"本章剩 {chap_remain:,} 字 · 全书剩 {book_remain:,} 字  |  ← → 翻章  滚轮滚动")
+        )
+        # 顶部字数条：字数在前，窗口太窄被裁掉的也是排在后面的字
+        self.top_status.config(
+            text=f"本章剩 {chap_remain:,} 字 · 全书剩 {book_remain:,} 字"
         )
 
     # ── 透明度 ─────────────────────────────────────────
