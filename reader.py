@@ -391,8 +391,10 @@ class ReaderApp:
 
         self._build_menu()
         self._build_toolbar()
-        self._build_text_area()
+        # 状态栏必须先于文本区打包：文本区 pack(fill=BOTH, expand=True) 会占满剩余空间，
+        # 之后再 pack 的 side=TOP 只能被挤到窗口底部（v1.4.4 字数条沉底的根因）
         self._build_status_bar()
+        self._build_text_area()
         self._bind_events()
 
         last_book = self.progress.get("last_book", "")
