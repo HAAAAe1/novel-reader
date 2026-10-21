@@ -404,9 +404,12 @@ class ReaderApp:
 
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="打开书籍...", command=self._on_open, accelerator="Ctrl+O")
+        self._recent_menu = tk.Menu(file_menu, tearoff=0)
+        file_menu.add_cascade(label="最近打开", menu=self._recent_menu)
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self._on_quit)
         menubar.add_cascade(label="文件", menu=file_menu)
+        self._rebuild_recent_menu()
 
         view_menu = tk.Menu(menubar, tearoff=0)
         self._topmost_var = tk.BooleanVar(value=self.cfg["always_on_top"])
@@ -428,6 +431,24 @@ class ReaderApp:
         menubar.add_cascade(label="帮助", menu=help_menu)
 
         self.root.config(menu=menubar)
+
+    def _rebuild_recent_menu(self):
+        """文件 → 最近打开：按最近打开时间排，点一下直接回到上次读的位置。"""
+        m = self._recent_menu
+        m.delete(0, tk.END)
+        books = self.progress.get("books", {})
+        if not books:
+            m.add_command(label="（暂无）", state=tk.DISABLED)
+            return
+        items = sorted(books.items(), key=lambda kv: kv[1].get("last_open", 0), reverse=True)
+        for path, info in items[:10]:
+            name = os.path.basename(path)
+            chap = info.get("chapter", -1)
+            if not os.path.exists(path):
+                m.add_command(label=f"{name}（文件不存在）", state=tk.DISABLED)
+                continue
+            label = f"{name}（第 {chap + 1} 章）" if chap >= 0 else name
+            m.add_command(label=label, command=lambda p=path: self._open_book(p))
 
     def _build_toolbar(self):
         tb = tk.Frame(self.root, bg=self.cfg["bg_color"], height=28)
@@ -556,6 +577,7 @@ class ReaderApp:
 
         self._load_chapter(self.current_chapter)
         self.root.title(f"{APP_NAME} - {os.path.basename(path)}")
+        self._rebuild_recent_menu()
 
     def _rebuild_toc_menu(self):
         chapter_titles = [t for t, _ in self.loader.toc]
@@ -923,6 +945,7 @@ Escape    最小化窗口
         self.progress["books"][self.current_book_path] = {
             "chapter": self.current_chapter,
             "scroll": self.text.yview()[0],
+            "last_open": time.time(),
         }
         try:
             geo = self.root.geometry()
@@ -934,6 +957,8 @@ Escape    最小化窗口
         except Exception:
             pass
         save_progress(self.progress)
+        # 进度刚落盘，最近打开列表跟着刷新（开书后这里才第一次记到这本书）
+        self._rebuild_recent_menu()
 
     def _on_quit(self):
         self._save_progress()
